@@ -61,33 +61,58 @@ struct Bind {
 }
 
 fn parse_binds(content: &str) -> Vec<Bind> {
+    let vars = parse_variables(content);
     let mut results = Vec::new();
 
     for line in content.lines() {
-        let line = line.trim();
-
-        let is_bind = line.starts_with("bindel")
-            || line.starts_with("bindl")
-            || line.starts_with("bindm")
-            || line.starts_with("bind ")
-            || line.starts_with("bind=");
-
-        if !is_bind { continue; }
+        // ... existing bind detection ...
 
         let Some(rhs) = line.splitn(2, '=').nth(1) else { continue };
         let parts: Vec<&str> = rhs.splitn(4, ',').map(|p| p.trim()).collect();
         if parts.len() < 3 { continue; }
 
         results.push(Bind {
-            modifiers: parts[0].to_string(),
-            key:       parts[1].to_string(),
+            modifiers: expand_variables(parts[0], &vars),
+            key:       expand_variables(parts[1], &vars),
             dispatcher: parts[2].to_string(),
-            arg: if parts.len() > 3 { parts[3].to_string() } else { String::new() },
+            arg: if parts.len() > 3 { 
+                expand_variables(parts[3], &vars) 
+            } else { 
+                String::new() 
+            },
         });
     }
 
     results.sort_by(|a, b| format_combo(a).cmp(&format_combo(b)));
     results
+}
+
+fn parse_variables(content: &str) -> std::collections::HashMap<String, String> {
+    let mut vars = std::collections::HashMap::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rhs) = line.strip_prefix('$') {
+            let parts: Vec<&str> = rhs.splitn(2, '=').collect();
+            if parts.len() == 2 {
+                let key = format!("${}", parts[0].trim());
+                let val = parts[1].trim().to_string();
+                vars.insert(key, val);
+            }
+        }
+    }
+
+    vars
+}
+
+fn expand_variables(s: &str, vars: &std::collections::HashMap<String, String>) -> String {
+    let mut result = s.to_string();
+    for (key, val) in vars {
+        if result.contains(key.as_str()) {
+            result = result.replace(key.as_str(), &format!("{} ({})", key, val));
+        }
+    }
+    result
 }
 
 fn friendly_key(key: &str) -> &str {
