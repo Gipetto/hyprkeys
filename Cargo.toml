@@ -1,7 +1,8 @@
 [package]
 name = "hyprkeys"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-comfy-table = "7"
+ratatui = "0.29"
+fuzzy-matcher = "0.3"
