@@ -31,7 +31,10 @@ fn main() {
         std::process::exit(0);
     }
 
-    let path = format!("{}/.config/hypr/hyprland.conf", env!("HOME"));
+    let home = env::var("HOME")
+        .unwrap_or_else(|_| { eprintln!("HOME not set"); std::process::exit(1); });
+
+    let path = format!("{}/.config/hypr/hyprland.conf", home);
 
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| { eprintln!("Error reading {}: {}", path, e); std::process::exit(1); });
