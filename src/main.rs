@@ -16,6 +16,138 @@ use ratatui::{
 use std::env;
 use std::fs;
 
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct Theme {
+    media: Color,
+    workspace: Color,
+    window: Color,
+    exec: Color,
+    other: Color,
+    /// Dispatcher name
+    dispatcher: Color,
+    /// Dim text: counts, path in title bar
+    dim: Color,
+    /// "search:" / "copied:" labels
+    label: Color,
+    /// "copied:" label specifically
+    copied: Color,
+    /// List selection highlight background
+    highlight_bg: Color,
+}
+
+impl Theme {
+    fn dark() -> Self {
+        Theme {
+            media: Color::Magenta,
+            workspace: Color::Blue,
+            window: Color::Cyan,
+            exec: Color::Green,
+            other: Color::White,
+            dispatcher: Color::Yellow,
+            dim: Color::DarkGray,
+            label: Color::White,
+            copied: Color::Green,
+            highlight_bg: Color::DarkGray,
+        }
+    }
+
+    fn light() -> Self {
+        Theme {
+            media: Color::Magenta,
+            workspace: Color::LightRed,
+            window: Color::Cyan,
+            exec: Color::Green,
+            other: Color::Reset,
+            dispatcher: Color::Yellow,
+            dim: Color::Indexed(247),
+            label: Color::Black,
+            copied: Color::Green,
+            highlight_bg: Color::Gray,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Category
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+enum Category {
+    Media,
+    Workspace,
+    Window,
+    Exec,
+    Other,
+}
+
+// ---------------------------------------------------------------------------
+// Bind
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct Bind {
+    modifiers: String,
+    key: String,
+    dispatcher: String,
+    arg: String,
+    arg_display: String,
+}
+
+impl Bind {
+    fn category(&self) -> Category {
+        let key_lc = self.key.to_lowercase();
+        let disp_lc = self.dispatcher.to_lowercase();
+
+        if key_lc.starts_with("xf86audio") || key_lc.starts_with("xf86monbright") {
+            return Category::Media;
+        }
+        if disp_lc == "workspace"
+            || disp_lc == "movetoworkspace"
+            || disp_lc == "movetoworkspacesilent"
+        {
+            return Category::Workspace;
+        }
+        if disp_lc.contains("window")
+            || matches!(
+                disp_lc.as_str(),
+                "movefocus"
+                    | "movewindow"
+                    | "resizeactive"
+                    | "swapwindow"
+                    | "togglefloating"
+                    | "fullscreen"
+                    | "pseudo"
+                    | "togglesplit"
+                    | "killactive"
+            )
+        {
+            return Category::Window;
+        }
+        if disp_lc == "exec" || disp_lc == "exec-once" {
+            return Category::Exec;
+        }
+        Category::Other
+    }
+
+    fn category_color(&self, theme: &Theme) -> Color {
+        match self.category() {
+            Category::Media => theme.media,
+            Category::Workspace => theme.workspace,
+            Category::Window => theme.window,
+            Category::Exec => theme.exec,
+            Category::Other => theme.other,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -24,46 +156,111 @@ fn main() {
         std::process::exit(0);
     }
 
-    let home = env::var("HOME").unwrap_or_else(|_| {
-        eprintln!("HOME not set");
-        std::process::exit(1);
-    });
+    // --config / -c
+    let path = if let Some(pos) = args.iter().position(|a| a == "--config" || a == "-c") {
+        args.get(pos + 1).cloned().unwrap_or_else(|| {
+            eprintln!("--config requires a path argument");
+            std::process::exit(1);
+        })
+    } else {
+        let home = env::var("HOME").unwrap_or_else(|_| {
+            eprintln!("HOME not set");
+            std::process::exit(1);
+        });
+        format!("{}/.config/hypr/hyprland.conf", home)
+    };
 
-    let path = format!("{}/.config/hypr/hyprland.conf", home);
-    let content = fs::read_to_string(&path).unwrap_or_else(|e| {
-        eprintln!("Error reading {}: {}", path, e);
-        std::process::exit(1);
-    });
+    let theme = if let Some(pos) = args.iter().position(|a| a == "--theme" || a == "-t") {
+        match args.get(pos + 1).map(|s| s.as_str()) {
+            Some("light") => Theme::light(),
+            Some("dark") | None => Theme::dark(),
+            Some(other) => {
+                eprintln!("Unknown theme '{}'. Valid options: dark, light", other);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        Theme::dark()
+    };
 
+    let content = load_config(&path);
     let binds = parse_binds(&content);
 
-    run_tui(binds, &path).unwrap();
+    run_tui(binds, &path, theme).unwrap();
 }
 
 fn print_help() {
     println!("hyprkeys - Hyprland keybinding lookup tool");
     println!();
     println!("USAGE:");
-    println!("  hyprkeys");
+    println!("  hyprkeys [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("  -c, --config <path>        Use a custom hyprland config file");
+    println!("  -t, --theme  <dark|light>  Color theme (default: dark)");
     println!();
     println!("CONTROLS:");
     println!("  Type          Filter bindings by fuzzy search");
     println!("  Up/Down       Navigate results");
+    println!("  Ctrl+U        Clear search query");
     println!("  :q or Esc     Quit");
     println!();
     println!("EXAMPLES:");
     println!("  hyprkeys");
-    println!("  hyprkeys --help");
+    println!("  hyprkeys --theme light");
+    println!("  hyprkeys --config ~/.config/hypr/binds.conf --theme light");
 }
 
-#[derive(Debug, Clone)]
-struct Bind {
-    modifiers: String,
-    key: String,
-    dispatcher: String,
-    arg: String,         // plain expanded, for copying
-    arg_display: String, // with # comment, for display
+// ---------------------------------------------------------------------------
+// Config loading (follows `source` directives)
+// ---------------------------------------------------------------------------
+
+fn load_config(path: &str) -> String {
+    load_config_inner(path, 0)
 }
+
+fn load_config_inner(path: &str, depth: u8) -> String {
+    if depth > 16 {
+        return String::new();
+    }
+
+    let expanded = expand_tilde(path);
+    let content = match fs::read_to_string(&expanded) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error reading {}: {}", expanded, e);
+            return String::new();
+        }
+    };
+
+    let mut result = String::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rhs) = trimmed
+            .strip_prefix("source")
+            .and_then(|s| s.trim_start().strip_prefix('='))
+        {
+            result.push_str(&load_config_inner(rhs.trim(), depth + 1));
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") {
+        let home = env::var("HOME").unwrap_or_default();
+        format!("{}/{}", home, &path[2..])
+    } else {
+        path.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
 
 fn parse_binds(content: &str) -> Vec<Bind> {
     let vars = parse_variables(content);
@@ -71,16 +268,15 @@ fn parse_binds(content: &str) -> Vec<Bind> {
 
     for line in content.lines() {
         let line = line.trim();
-
         let is_bind = line.starts_with("bindel")
             || line.starts_with("bindl")
             || line.starts_with("bindm")
             || line.starts_with("bind ")
             || line.starts_with("bind=");
-
         if !is_bind {
             continue;
         }
+
         let Some(rhs) = line.splitn(2, '=').nth(1) else {
             continue;
         };
@@ -112,19 +308,15 @@ fn parse_binds(content: &str) -> Vec<Bind> {
 
 fn parse_variables(content: &str) -> std::collections::HashMap<String, String> {
     let mut vars = std::collections::HashMap::new();
-
     for line in content.lines() {
         let line = line.trim();
         if let Some(rhs) = line.strip_prefix('$') {
             let parts: Vec<&str> = rhs.splitn(2, '=').collect();
             if parts.len() == 2 {
-                let key = format!("${}", parts[0].trim());
-                let val = parts[1].trim().to_string();
-                vars.insert(key, val);
+                vars.insert(format!("${}", parts[0].trim()), parts[1].trim().to_string());
             }
         }
     }
-
     vars
 }
 
@@ -197,12 +389,15 @@ fn format_bind(bind: &Bind) -> String {
     )
 }
 
-fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+// ---------------------------------------------------------------------------
+// TUI
+// ---------------------------------------------------------------------------
+
+fn run_tui(binds: Vec<Bind>, path: &str, theme: Theme) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
     let matcher = SkimMatcherV2::default();
     let mut query = String::new();
@@ -212,14 +407,11 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
 
     loop {
         let filtered: Vec<&Bind> = if query.is_empty() {
-            binds.iter().collect() // already sorted by combo from parse_binds
+            binds.iter().collect()
         } else {
             let mut scored: Vec<(i64, &Bind)> = binds
                 .iter()
-                .filter_map(|b| {
-                    let text = format_bind(b);
-                    matcher.fuzzy_match(&text, &query).map(|score| (score, b))
-                })
+                .filter_map(|b| matcher.fuzzy_match(&format_bind(b), &query).map(|s| (s, b)))
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0));
             scored.into_iter().map(|(_, b)| b).collect()
@@ -230,11 +422,14 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
             list_state.select(Some(filtered.len() - 1));
         }
 
-        if let Some((_, time)) = &copied {
-            if time.elapsed() > std::time::Duration::from_secs(2) {
+        if let Some((_, t)) = &copied {
+            if t.elapsed() > std::time::Duration::from_secs(2) {
                 copied = None;
             }
         }
+
+        let result_count = filtered.len();
+        let total_count = binds.len();
 
         terminal.draw(|f| {
             let area = f.area();
@@ -243,9 +438,8 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
                 .borders(Borders::ALL)
                 .title(Line::from(vec![
                     Span::styled(" hyprkeys ", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("─ {} ", path), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("─ {} ", path), Style::default().fg(theme.dim)),
                 ]));
-
             let inner_area = outer.inner(area);
             f.render_widget(outer, area);
 
@@ -254,27 +448,51 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
                 .constraints([Constraint::Length(3), Constraint::Min(0)])
                 .split(inner_area);
 
-            let search_text = if let Some(ref c) = copied {
+            // Search bar
+            let search_line = if let Some(ref c) = copied {
                 Line::from(vec![
                     Span::styled(
                         "copied: ",
                         Style::default()
-                            .add_modifier(Modifier::BOLD)
-                            .fg(Color::Green),
+                            .fg(theme.copied)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(c.0.as_str()),
+                    Span::styled(c.0.as_str(), Style::default().fg(theme.label)),
+                ])
+            } else if query.is_empty() {
+                Line::from(vec![
+                    Span::styled(
+                        "search: ",
+                        Style::default()
+                            .fg(theme.label)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("({} bindings)", total_count),
+                        Style::default().fg(theme.dim),
+                    ),
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled("search: ", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(query.as_str()),
+                    Span::styled(
+                        "search: ",
+                        Style::default()
+                            .fg(theme.label)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(query.as_str(), Style::default().fg(theme.label)),
+                    Span::styled(
+                        format!("  ({result_count})"),
+                        Style::default().fg(theme.dim),
+                    ),
                 ])
             };
+            f.render_widget(
+                Paragraph::new(search_line).block(Block::default().borders(Borders::ALL)),
+                chunks[0],
+            );
 
-            let search = Paragraph::new(search_text).block(Block::default().borders(Borders::ALL));
-
-            f.render_widget(search, chunks[0]);
-
+            // Binding list
             let items: Vec<ListItem> = filtered
                 .iter()
                 .map(|b| {
@@ -282,13 +500,13 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
                         Span::styled(
                             format!("{:<35}", format_combo(b)),
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(b.category_color(&theme))
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(" "),
-                        Span::styled(&b.dispatcher, Style::default().fg(Color::Yellow)),
+                        Span::styled(&b.dispatcher, Style::default().fg(theme.dispatcher)),
                         Span::raw(" "),
-                        Span::raw(&b.arg_display),
+                        Span::styled(&b.arg_display, Style::default().fg(theme.other)),
                     ]))
                 })
                 .collect();
@@ -297,7 +515,7 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
                 .block(Block::default().borders(Borders::ALL))
                 .highlight_style(
                     Style::default()
-                        .bg(Color::DarkGray)
+                        .bg(theme.highlight_bg)
                         .add_modifier(Modifier::BOLD),
                 )
                 .highlight_symbol("▶ ");
@@ -309,6 +527,11 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
             if let Event::Key(key) = event::read()? {
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => break,
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                        query.clear();
+                        copied = None;
+                        list_state.select(Some(0));
+                    }
                     (KeyCode::Char(c), _) => {
                         copied = None;
                         query.push(c);

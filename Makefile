@@ -4,4 +4,5 @@ build:
 	cargo build --release
 
 run:
-	./target/release/hyprkeys
+	./target/release/hyprkeys -t light
+
