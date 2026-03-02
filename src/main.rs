@@ -1,7 +1,5 @@
-use std::fs;
-use std::env;
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use ratatui::{
     backend::CrosstermBackend,
     crossterm::{
@@ -15,6 +13,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
+use std::env;
+use std::fs;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -24,16 +24,20 @@ fn main() {
         std::process::exit(0);
     }
 
-    let home = env::var("HOME")
-        .unwrap_or_else(|_| { eprintln!("HOME not set"); std::process::exit(1); });
+    let home = env::var("HOME").unwrap_or_else(|_| {
+        eprintln!("HOME not set");
+        std::process::exit(1);
+    });
 
     let path = format!("{}/.config/hypr/hyprland.conf", home);
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| { eprintln!("Error reading {}: {}", path, e); std::process::exit(1); });
+    let content = fs::read_to_string(&path).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", path, e);
+        std::process::exit(1);
+    });
 
     let binds = parse_binds(&content);
 
-    run_tui(binds).unwrap();
+    run_tui(binds, &path).unwrap();
 }
 
 fn print_help() {
@@ -67,18 +71,22 @@ fn parse_binds(content: &str) -> Vec<Bind> {
     for line in content.lines() {
         // ... existing bind detection ...
 
-        let Some(rhs) = line.splitn(2, '=').nth(1) else { continue };
+        let Some(rhs) = line.splitn(2, '=').nth(1) else {
+            continue;
+        };
         let parts: Vec<&str> = rhs.splitn(4, ',').map(|p| p.trim()).collect();
-        if parts.len() < 3 { continue; }
+        if parts.len() < 3 {
+            continue;
+        }
 
         results.push(Bind {
             modifiers: expand_variables(parts[0], &vars),
-            key:       expand_variables(parts[1], &vars),
+            key: expand_variables(parts[1], &vars),
             dispatcher: parts[2].to_string(),
-            arg: if parts.len() > 3 { 
-                expand_variables(parts[3], &vars) 
-            } else { 
-                String::new() 
+            arg: if parts.len() > 3 {
+                expand_variables(parts[3], &vars)
+            } else {
+                String::new()
             },
         });
     }
@@ -119,19 +127,20 @@ fn friendly_key(key: &str) -> &str {
     match key {
         "XF86AudioRaiseVolume" => "Volume Up",
         "XF86AudioLowerVolume" => "Volume Down",
-        "XF86AudioMute"        => "Mute",
-        "XF86AudioMicMute"     => "Mic Mute",
-        "XF86AudioPlay"        => "Play/Pause",
-        "XF86AudioPause"       => "Pause",
-        "XF86AudioNext"        => "Next Track",
-        "XF86AudioPrev"        => "Prev Track",
-        "XF86AudioStop"        => "Stop",
-        other                  => other,
+        "XF86AudioMute" => "Mute",
+        "XF86AudioMicMute" => "Mic Mute",
+        "XF86AudioPlay" => "Play/Pause",
+        "XF86AudioPause" => "Pause",
+        "XF86AudioNext" => "Next Track",
+        "XF86AudioPrev" => "Prev Track",
+        "XF86AudioStop" => "Stop",
+        other => other,
     }
 }
 
 fn format_combo(bind: &Bind) -> String {
-    let mods = bind.modifiers
+    let mods = bind
+        .modifiers
         .replace("$mainMod", "SUPER")
         .replace(" SHIFT", " + SHIFT")
         .replace(" ALT", " + ALT")
@@ -154,7 +163,7 @@ fn format_bind(bind: &Bind) -> String {
     format!("{:<35} {}", combo, action)
 }
 
-fn run_tui(binds: Vec<Bind>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -168,9 +177,10 @@ fn run_tui(binds: Vec<Bind>) -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let filtered: Vec<&Bind> = if query.is_empty() {
-            binds.iter().collect()  // already sorted by combo from parse_binds
+            binds.iter().collect() // already sorted by combo from parse_binds
         } else {
-            let mut scored: Vec<(i64, &Bind)> = binds.iter()
+            let mut scored: Vec<(i64, &Bind)> = binds
+                .iter()
                 .filter_map(|b| {
                     let text = format_bind(b);
                     matcher.fuzzy_match(&text, &query).map(|score| (score, b))
@@ -190,8 +200,10 @@ fn run_tui(binds: Vec<Bind>) -> Result<(), Box<dyn std::error::Error>> {
 
             let outer = Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" hyprkeys ", Style::default().add_modifier(Modifier::BOLD)))
-                .style(Style::default());
+                .title(Line::from(vec![
+                    Span::styled(" hyprkeys ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("─ {} ", path), Style::default().fg(Color::DarkGray)),
+                ]));
 
             let inner_area = outer.inner(area);
             f.render_widget(outer, area);
@@ -202,32 +214,38 @@ fn run_tui(binds: Vec<Bind>) -> Result<(), Box<dyn std::error::Error>> {
                 .split(inner_area);
 
             let search = Paragraph::new(Line::from(vec![
-                    Span::styled("search: ", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(query.as_str()),
-                ]))
-                .block(Block::default().borders(Borders::ALL));
-            
+                Span::styled("search: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(query.as_str()),
+            ]))
+            .block(Block::default().borders(Borders::ALL));
+
             f.render_widget(search, chunks[0]);
 
-            let items: Vec<ListItem> = filtered.iter().map(|b| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{:<35}", format_combo(b)),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        &b.dispatcher,
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::raw(" "),
-                    Span::raw(&b.arg),
-                ]))
-            }).collect();
+            let items: Vec<ListItem> = filtered
+                .iter()
+                .map(|b| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{:<35}", format_combo(b)),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(&b.dispatcher, Style::default().fg(Color::Yellow)),
+                        Span::raw(" "),
+                        Span::raw(&b.arg),
+                    ]))
+                })
+                .collect();
 
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL))
-                .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .highlight_symbol("▶ ");
 
             f.render_stateful_widget(list, chunks[1], &mut list_state);
@@ -235,11 +253,12 @@ fn run_tui(binds: Vec<Bind>) -> Result<(), Box<dyn std::error::Error>> {
 
         if let Event::Key(key) = event::read()? {
             match (key.code, key.modifiers) {
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) |
-                (KeyCode::Esc, _) => break,
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => break,
                 (KeyCode::Char(c), _) => {
                     query.push(c);
-                    if query == ":q" { break; }
+                    if query == ":q" {
+                        break;
+                    }
                     list_state.select(Some(0));
                 }
                 (KeyCode::Backspace, _) => {
