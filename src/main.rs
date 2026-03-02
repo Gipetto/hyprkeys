@@ -61,7 +61,8 @@ struct Bind {
     modifiers: String,
     key: String,
     dispatcher: String,
-    arg: String,
+    arg: String,         // plain expanded, for copying
+    arg_display: String, // with # comment, for display
 }
 
 fn parse_binds(content: &str) -> Vec<Bind> {
@@ -69,8 +70,17 @@ fn parse_binds(content: &str) -> Vec<Bind> {
     let mut results = Vec::new();
 
     for line in content.lines() {
-        // ... existing bind detection ...
+        let line = line.trim();
 
+        let is_bind = line.starts_with("bindel")
+            || line.starts_with("bindl")
+            || line.starts_with("bindm")
+            || line.starts_with("bind ")
+            || line.starts_with("bind=");
+
+        if !is_bind {
+            continue;
+        }
         let Some(rhs) = line.splitn(2, '=').nth(1) else {
             continue;
         };
@@ -85,6 +95,11 @@ fn parse_binds(content: &str) -> Vec<Bind> {
             dispatcher: parts[2].to_string(),
             arg: if parts.len() > 3 {
                 expand_variables(parts[3], &vars)
+            } else {
+                String::new()
+            },
+            arg_display: if parts.len() > 3 {
+                expand_variables_display(parts[3], &vars)
             } else {
                 String::new()
             },
@@ -116,8 +131,24 @@ fn parse_variables(content: &str) -> std::collections::HashMap<String, String> {
 fn expand_variables(s: &str, vars: &std::collections::HashMap<String, String>) -> String {
     let mut result = s.to_string();
     for (key, val) in vars {
+        if key == "$mainMod" {
+            continue;
+        }
         if result.contains(key.as_str()) {
-            result = result.replace(key.as_str(), &format!("{} ({})", key, val));
+            result = result.replace(key.as_str(), val);
+        }
+    }
+    result
+}
+
+fn expand_variables_display(s: &str, vars: &std::collections::HashMap<String, String>) -> String {
+    let mut result = s.to_string();
+    for (key, val) in vars {
+        if key == "$mainMod" {
+            continue;
+        }
+        if result.contains(key.as_str()) {
+            result = result.replace(key.as_str(), &format!("{} # {}", val, key));
         }
     }
     result
@@ -155,12 +186,15 @@ fn format_combo(bind: &Bind) -> String {
 
 fn format_bind(bind: &Bind) -> String {
     let combo = format_combo(bind);
-    let action = if bind.arg.is_empty() {
-        bind.dispatcher.clone()
-    } else {
-        format!("{} {}", bind.dispatcher, bind.arg)
-    };
-    format!("{:<35} {}", combo, action)
+    format!(
+        "{:<35} {}",
+        combo,
+        if bind.arg_display.is_empty() {
+            bind.dispatcher.clone()
+        } else {
+            format!("{} {}", bind.dispatcher, bind.arg_display)
+        }
+    )
 }
 
 fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -174,6 +208,7 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
     let mut query = String::new();
     let mut list_state = ListState::default();
     list_state.select(Some(0));
+    let mut copied: Option<(String, std::time::Instant)> = None;
 
     loop {
         let filtered: Vec<&Bind> = if query.is_empty() {
@@ -195,6 +230,12 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
             list_state.select(Some(filtered.len() - 1));
         }
 
+        if let Some((_, time)) = &copied {
+            if time.elapsed() > std::time::Duration::from_secs(2) {
+                copied = None;
+            }
+        }
+
         terminal.draw(|f| {
             let area = f.area();
 
@@ -213,11 +254,24 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
                 .constraints([Constraint::Length(3), Constraint::Min(0)])
                 .split(inner_area);
 
-            let search = Paragraph::new(Line::from(vec![
-                Span::styled("search: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(query.as_str()),
-            ]))
-            .block(Block::default().borders(Borders::ALL));
+            let search_text = if let Some(ref c) = copied {
+                Line::from(vec![
+                    Span::styled(
+                        "copied: ",
+                        Style::default()
+                            .add_modifier(Modifier::BOLD)
+                            .fg(Color::Green),
+                    ),
+                    Span::raw(c.0.as_str()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("search: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(query.as_str()),
+                ])
+            };
+
+            let search = Paragraph::new(search_text).block(Block::default().borders(Borders::ALL));
 
             f.render_widget(search, chunks[0]);
 
@@ -234,7 +288,7 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
                         Span::raw(" "),
                         Span::styled(&b.dispatcher, Style::default().fg(Color::Yellow)),
                         Span::raw(" "),
-                        Span::raw(&b.arg),
+                        Span::raw(&b.arg_display),
                     ]))
                 })
                 .collect();
@@ -251,33 +305,50 @@ fn run_tui(binds: Vec<Bind>, path: &str) -> Result<(), Box<dyn std::error::Error
             f.render_stateful_widget(list, chunks[1], &mut list_state);
         })?;
 
-        if let Event::Key(key) = event::read()? {
-            match (key.code, key.modifiers) {
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => break,
-                (KeyCode::Char(c), _) => {
-                    query.push(c);
-                    if query == ":q" {
-                        break;
+        if event::poll(std::time::Duration::from_millis(250))? {
+            if let Event::Key(key) = event::read()? {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => break,
+                    (KeyCode::Char(c), _) => {
+                        copied = None;
+                        query.push(c);
+                        if query == ":q" {
+                            break;
+                        }
+                        list_state.select(Some(0));
                     }
-                    list_state.select(Some(0));
-                }
-                (KeyCode::Backspace, _) => {
-                    query.pop();
-                    list_state.select(Some(0));
-                }
-                (KeyCode::Down, _) => {
-                    let i = list_state.selected().unwrap_or(0);
-                    if i + 1 < filtered.len() {
-                        list_state.select(Some(i + 1));
+                    (KeyCode::Backspace, _) => {
+                        copied = None;
+                        query.pop();
+                        list_state.select(Some(0));
                     }
-                }
-                (KeyCode::Up, _) => {
-                    let i = list_state.selected().unwrap_or(0);
-                    if i > 0 {
-                        list_state.select(Some(i - 1));
+                    (KeyCode::Down, _) => {
+                        let i = list_state.selected().unwrap_or(0);
+                        if i + 1 < filtered.len() {
+                            list_state.select(Some(i + 1));
+                        }
                     }
+                    (KeyCode::Up, _) => {
+                        let i = list_state.selected().unwrap_or(0);
+                        if i > 0 {
+                            list_state.select(Some(i - 1));
+                        }
+                    }
+                    (KeyCode::Enter, _) => {
+                        if let Some(i) = list_state.selected() {
+                            if let Some(bind) = filtered.get(i) {
+                                let command = if bind.arg.is_empty() {
+                                    format!("hyprctl dispatch {}", bind.dispatcher)
+                                } else {
+                                    format!("hyprctl dispatch {} {}", bind.dispatcher, bind.arg)
+                                };
+                                let _ = std::process::Command::new("wl-copy").arg(&command).spawn();
+                                copied = Some((command, std::time::Instant::now()));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
